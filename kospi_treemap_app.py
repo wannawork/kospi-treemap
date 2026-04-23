@@ -600,7 +600,39 @@ def build_trend_chart(df_all, selected_date):
 # MAIN
 # ═══════════════════════════════════════
 
+def check_password():
+    """비밀번호 확인 — 통과하면 True 반환"""
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🔐 KOSPI 트리맵 로그인")
+    st.markdown("---")
+    pw = st.text_input("비밀번호를 입력하세요", type="password", placeholder="Password")
+    if st.button("로그인", use_container_width=True):
+        correct = st.secrets.get("APP_PASSWORD", "")
+        if not correct:
+            # secrets 없으면 toml 직접 파싱
+            try:
+                import toml
+                secrets_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    ".streamlit", "secrets.toml"
+                )
+                if os.path.exists(secrets_path):
+                    correct = toml.load(secrets_path).get("APP_PASSWORD", "")
+            except Exception:
+                pass
+        if pw == correct and correct:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("❌ 비밀번호가 틀렸습니다")
+    st.stop()
+
 def main():
+    # 비밀번호 확인
+    check_password()
+
     st.markdown("""
     <style>
         .block-container { padding-top: 0.8rem; }
