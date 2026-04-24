@@ -510,9 +510,9 @@ def build_treemap(df, date_str, kospi_idx, total_min, total_max):
         scale_ratio = 1.0
 
     # 트리맵 높이 조정 (비율 반영)
-    base_height = 700
+    base_height = 560
     chart_height = int(base_height * scale_ratio)
-    chart_height = max(chart_height, 350)  # 최소 350px
+    chart_height = max(chart_height, 300)  # 최소 300px
 
     sec_sum = df.groupby("Sector")["Marcap"].sum()
     df = df.copy()
@@ -640,17 +640,13 @@ def build_trend_chart(df_all, selected_date, df_events=None):
             flag    = "🇺🇸" if country == "미국" else "🇰🇷"
 
             fig.add_vline(
-                x=row["Date"].timestamp() * 1000,
+                x=str(row["Date"].date()),
                 line=dict(color=color, width=1.2, dash=dash),
-                annotation=dict(
-                    text=f"{flag}{title}",
-                    textangle=-90,
-                    font=dict(size=9, color=color),
-                    showarrow=False,
-                    yanchor="top",
-                    yref="paper",
-                    y=0.98,
-                ),
+                annotation_text=f"{flag}{title}",
+                annotation_textangle=-90,
+                annotation_font_size=9,
+                annotation_font_color=color,
+                annotation_position="top",
             )
             # 호버용 invisible scatter
             match = daily[daily["Date"].dt.date == row["Date"].date()]
