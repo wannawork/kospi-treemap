@@ -30,6 +30,7 @@ APP_SECRET = ("VRNSXejM5BOCV/rdDOZWSwxr6pmsUniHFSyv08ny7TrWQkW4NJCjKjv4RhmvKKbn"
 BASE_URL         = "https://openapi.koreainvestment.com:9443"
 SPREADSHEET_NAME = "KOSPI_MarketCap"
 SPREADSHEET_ID   = "1AKdxk-5_nKsf7smFGOCek4CWgxNz8b4yBk89hIQGMLk"
+CALENDAR_ID      = "1LiRq6Fvs8wjI_HwhyxBdFTcwtifyKiz1rOzqOul5gDY"
 PARENT_FOLDER    = "개인"
 SUB_FOLDER       = "stock_data_2"
 COLS             = ["Date","Code","Name","Sector","Marcap","Price","Rank"]
@@ -456,6 +457,26 @@ def save_data(new_df):
     return "local"
 
 
+def load_events():
+    """금융 일정 로드 (별도 스프레드시트)"""
+    try:
+        gc, info = _try_sheets_client()
+        if not gc:
+            return pd.DataFrame()
+        ss  = gc.open_by_key(CALENDAR_ID)
+        try:
+            ws = ss.worksheet("Events")
+        except Exception:
+            ws = ss.sheet1
+        records = ws.get_all_records()
+        if not records:
+            return pd.DataFrame()
+        df = pd.DataFrame(records)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        return df.dropna(subset=["Date"])
+    except Exception as e:
+        return pd.DataFrame()
+
 # ═══════════════════════════════════════
 # 시각화
 # ═══════════════════════════════════════
@@ -555,7 +576,18 @@ def build_treemap(df, date_str, kospi_idx, total_min, total_max):
     )
     return fig
 
-def build_trend_chart(df_all, selected_date):
+# 이벤트 타입별 색상
+EVENT_COLORS = {
+    "금리":     {"미국": "#E53935", "한국": "#FF7043"},
+    "경제지표": {"미국": "#1565C0", "한국": "#42A5F5"},
+    "실적":     {"미국": "#6A1B9A", "한국": "#AB47BC"},
+    "기타":     {"미국": "#37474F", "한국": "#78909C"},
+}
+
+def get_event_color(country, etype):
+    return EVENT_COLORS.get(etype, EVENT_COLORS["기타"]).get(country, "#888")
+
+def build_trend_chart(df_all, selected_date, df_events=None):
     daily = (df_all.groupby("Date")["Marcap"].sum()
              .reset_index().rename(columns={"Marcap":"Total"}))
     daily["조"] = daily["Total"] / 1e12
@@ -567,8 +599,11 @@ def build_trend_chart(df_all, selected_date):
         line=dict(color="#1565C0", width=2),
         marker=dict(size=4, color="#1565C0"),
         fillcolor="rgba(21,101,192,0.12)",
+        name="시총 합계",
         hovertemplate="%{x|%Y-%m-%d}  %{y:,.0f}조원<extra></extra>",
     ))
+
+    # 선택일 강조
     sel = daily[daily["Date"].dt.date == selected_date]
     if not sel.empty:
         fig.add_trace(go.Scatter(
@@ -578,6 +613,7 @@ def build_trend_chart(df_all, selected_date):
             hovertemplate="%{x|%Y-%m-%d}  %{y:,.0f}조원<extra></extra>",
         ))
 
+    # 스케일 구간 점선
     ymin = daily["조"].min()*0.97
     ymax = daily["조"].max()*1.03
     for t in SCALE_TIERS:
@@ -586,12 +622,61 @@ def build_trend_chart(df_all, selected_date):
                           annotation_text=f"{t:,}조", annotation_position="right",
                           annotation_font_size=9)
 
+    # 금융 일정 이벤트 표시
+    if df_events is not None and not df_events.empty:
+        date_min = daily["Date"].min()
+        date_max = daily["Date"].max()
+        ev = df_events[
+            (df_events["Date"] >= date_min) &
+            (df_events["Date"] <= date_max)
+        ]
+        for _, row in ev.iterrows():
+            country = str(row.get("Country", "기타"))
+            etype   = str(row.get("Type", "기타"))
+            title   = str(row.get("Title", ""))
+            desc    = str(row.get("Description", ""))
+            color   = get_event_color(country, etype)
+            dash    = "solid" if country == "미국" else "dot"
+            flag    = "🇺🇸" if country == "미국" else "🇰🇷"
+
+            fig.add_vline(
+                x=row["Date"].timestamp() * 1000,
+                line=dict(color=color, width=1.2, dash=dash),
+                annotation=dict(
+                    text=f"{flag}{title}",
+                    textangle=-90,
+                    font=dict(size=9, color=color),
+                    showarrow=False,
+                    yanchor="top",
+                    yref="paper",
+                    y=0.98,
+                ),
+            )
+            # 호버용 invisible scatter
+            match = daily[daily["Date"].dt.date == row["Date"].date()]
+            y_val = match["조"].values[0] if not match.empty else ymax * 0.9
+            fig.add_trace(go.Scatter(
+                x=[row["Date"]], y=[y_val],
+                mode="markers",
+                marker=dict(color=color, size=8, symbol="diamond"),
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>{flag} {title}</b><br>"
+                    f"날짜: {row['Date'].strftime('%Y-%m-%d')}<br>"
+                    f"국가: {country} | 유형: {etype}<br>"
+                    f"{desc}<extra></extra>"
+                ),
+            ))
+
     fig.update_layout(
-        height=160, margin=dict(t=5, b=35, l=65, r=90),
+        height=220,
+        margin=dict(t=25, b=35, l=65, r=90),
         xaxis=dict(showgrid=False, title="", tickformat="%y.%m"),
         yaxis=dict(showgrid=True, title="조원"),
-        showlegend=False, hovermode="x unified",
-        plot_bgcolor="#FAFAFA", paper_bgcolor="white",
+        showlegend=False,
+        hovermode="x unified",
+        plot_bgcolor="#FAFAFA",
+        paper_bgcolor="white",
     )
     return fig
 
@@ -818,10 +903,21 @@ def main():
         use_container_width=True
     )
 
+    # ── 금융 일정 로드 ──
+    df_events = load_events()
+
     # ── 시총 추이 차트 (하단 스크롤 역할) ──
     if len(available_dates) > 1:
-        st.markdown(f"##### 📊 일별 시가총액 추이 (최대 {KEEP_DAYS//365}년, 빨간점 = 선택일)")
-        st.plotly_chart(build_trend_chart(df_history, selected_date), use_container_width=True)
+        legend_parts = []
+        if not df_events.empty:
+            if "미국" in df_events["Country"].values: legend_parts.append("🇺🇸실선=미국")
+            if "한국" in df_events["Country"].values: legend_parts.append("🇰🇷점선=한국")
+            type_colors = {"금리":"🔴","경제지표":"🔵","실적":"🟣","기타":"⚫"}
+            for t in df_events["Type"].unique():
+                if t in type_colors: legend_parts.append(f"{type_colors[t]}{t}")
+        legend_str = "  |  ".join(legend_parts)
+        st.markdown(f"##### 📊 일별 시가총액 추이  {legend_str}")
+        st.plotly_chart(build_trend_chart(df_history, selected_date, df_events), use_container_width=True)
 
     # ── 테이블 ──
     with st.expander("📋 종목 데이터 테이블"):
