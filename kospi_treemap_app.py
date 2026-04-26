@@ -736,40 +736,44 @@ def main():
     with st.spinner("📂 데이터 로드 중..."):
         df_history, source = load_data()
 
-    existing_dates = set() if df_history.empty else set(
-        df_history["Date"].dt.strftime("%Y-%m-%d").tolist()
-    )
-    today     = datetime.now().date()
-    need_init = df_history.empty or len(existing_dates) < 5
+    today = datetime.now().date()
 
-    # ── 초기 2년치 과거 데이터 수집 ──
-    if need_init:
-        st.info("📡 처음 실행입니다. 과거 2년치 데이터를 수집합니다 (10~20분 소요)...")
-        end_str   = today.strftime("%Y%m%d")
-        start_str = (today - timedelta(days=730)).strftime("%Y%m%d")
+    # ── 필요한 날짜 계산 (Google Sheets 확인 후 빠진 날짜만 수집) ──
+    if df_history.empty:
+        # 데이터 없음 → 2년치 전체 수집
+        fetch_start = (today - timedelta(days=730)).strftime("%Y%m%d")
+        fetch_end   = today.strftime("%Y%m%d")
+        fetch_label = "2년치 초기 데이터 수집 (10~20분 소요)"
+        need_fetch  = True
+    else:
+        # 마지막 날짜 확인 → 그 다음날부터 오늘까지만 수집
+        last_date  = df_history["Date"].max().date()
+        fetch_start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
+        fetch_end   = today.strftime("%Y%m%d")
+        # 주말/공휴일 제외: 실제 영업일이 있을 때만 수집
+        need_fetch  = last_date < today and fetch_start <= fetch_end
+        fetch_label = f"{last_date + timedelta(days=1)} ~ {today} 누락 데이터 수집"
+
+    if need_fetch:
+        st.info(f"📡 {fetch_label}...")
         top_stocks = fetch_top_stocks(token)
         if top_stocks:
-            hist_df = fetch_history_bulk(token, top_stocks, start_str, end_str, "2년치 과거 데이터 수집")
+            hist_df = fetch_history_bulk(token, top_stocks, fetch_start, fetch_end, fetch_label)
             if not hist_df.empty:
                 saved = save_data(hist_df)
                 label = "Google Sheets + 로컬 CSV" if saved=="sheets+local" else "로컬 CSV"
-                st.success(f"✅ {hist_df['Date'].dt.date.nunique()}일치 → {label} 저장 완료!")
-                df_history = hist_df
-                existing_dates = set(df_history["Date"].dt.strftime("%Y-%m-%d").tolist())
+                n_days = hist_df["Date"].dt.date.nunique()
+                st.success(f"✅ {n_days}일치 {len(hist_df)}건 → {label} 저장 완료!")
+                df_history = (
+                    pd.concat([df_history, hist_df], ignore_index=True)
+                    if not df_history.empty else hist_df
+                )
+            else:
+                st.info("📅 새로운 거래일 데이터가 없습니다 (주말/공휴일)")
 
-    # ── 오늘 데이터 없으면 오늘치 추가 ──
-    elif today.strftime("%Y-%m-%d") not in existing_dates:
-        with st.spinner("📡 오늘 데이터 수집 중..."):
-            top_stocks = fetch_top_stocks(token)
-            if top_stocks:
-                end_str   = today.strftime("%Y%m%d")
-                hist_df   = fetch_history_bulk(token, top_stocks, end_str, end_str, "오늘 데이터 수집")
-                if not hist_df.empty:
-                    saved = save_data(hist_df)
-                    label = "Google Sheets + 로컬 CSV" if saved=="sheets+local" else "로컬 CSV"
-                    st.success(f"✅ 오늘 {len(hist_df)}건 → {label} 저장")
-                    df_history = pd.concat([df_history, hist_df], ignore_index=True) if not df_history.empty else hist_df
-                    existing_dates = set(df_history["Date"].dt.strftime("%Y-%m-%d").tolist())
+    existing_dates = set() if df_history.empty else set(
+        df_history["Date"].dt.strftime("%Y-%m-%d").tolist()
+    )
 
     if df_history.empty:
         st.warning("⚠️ 데이터가 없습니다.")
