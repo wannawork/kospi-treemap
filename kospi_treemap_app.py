@@ -838,35 +838,14 @@ def main():
             st.session_state.pop("token", None)
             st.rerun()
 
-    # ── 날짜 슬라이더 + 버튼 이동 ──
+    # ── 날짜 인덱스 초기화 (슬라이더 아래로 이동했으므로 여기서 selected_date 임시 설정) ──
+    if "date_idx" not in st.session_state:
+        st.session_state["date_idx"] = len(available_dates) - 1
+
     if len(available_dates) == 1:
         selected_date = available_dates[0]
-        st.info(f"📅 {selected_date}")
     else:
-        if "date_idx" not in st.session_state:
-            st.session_state["date_idx"] = len(available_dates) - 1
-
-        col_prev, col_next = st.columns([1, 1])
-        with col_prev:
-            prev_clicked = st.button("◀ 이전날", key="btn_prev")
-        with col_next:
-            next_clicked = st.button("다음날 ▶", key="btn_next")
-
-        if prev_clicked:
-            st.session_state["date_idx"] = max(0, st.session_state["date_idx"] - 1)
-            st.rerun()
-        if next_clicked:
-            st.session_state["date_idx"] = min(len(available_dates)-1, st.session_state["date_idx"] + 1)
-            st.rerun()
-
-        selected_date = st.select_slider(
-            "📅 날짜 선택  ◀ 과거 ─────────────── 현재 ▶",
-            options=available_dates,
-            value=available_dates[st.session_state["date_idx"]],
-            format_func=lambda d: d.strftime("%Y.%m.%d"),
-            key="date_slider",
-        )
-        st.session_state["date_idx"] = list(available_dates).index(selected_date)
+        selected_date = available_dates[st.session_state["date_idx"]]
 
     # ── 필터 ──
     df_day = df_history[df_history["Date"].dt.date == selected_date].copy()
@@ -902,6 +881,32 @@ def main():
         build_treemap(df_day, str(selected_date), kospi_idx, total_min, total_max),
         use_container_width=True
     )
+
+    # ── 날짜 슬라이더 + 버튼 이동 (트리맵 바로 아래) ──
+    if len(available_dates) > 1:
+        col_prev, col_next = st.columns([1, 1])
+        with col_prev:
+            prev_clicked = st.button("◀ 이전날", key="btn_prev")
+        with col_next:
+            next_clicked = st.button("다음날 ▶", key="btn_next")
+
+        if prev_clicked:
+            st.session_state["date_idx"] = max(0, st.session_state["date_idx"] - 1)
+            st.rerun()
+        if next_clicked:
+            st.session_state["date_idx"] = min(len(available_dates)-1, st.session_state["date_idx"] + 1)
+            st.rerun()
+
+        new_date = st.select_slider(
+            "📅 날짜 선택  ◀ 과거 ─────────────── 현재 ▶",
+            options=available_dates,
+            value=available_dates[st.session_state["date_idx"]],
+            format_func=lambda d: d.strftime("%Y.%m.%d"),
+            key="date_slider",
+        )
+        if new_date != selected_date:
+            st.session_state["date_idx"] = list(available_dates).index(new_date)
+            st.rerun()
 
     # ── 금융 일정 로드 ──
     df_events = load_events()
