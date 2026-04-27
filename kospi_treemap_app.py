@@ -622,15 +622,9 @@ def build_trend_chart(df_all, selected_date, df_events=None):
                           annotation_text=f"{t:,}조", annotation_position="right",
                           annotation_font_size=9)
 
-    # 금융 일정 이벤트 표시
+    # 금융 일정 이벤트 표시 (x축 확장 범위 기준으로 필터링)
     if df_events is not None and not df_events.empty:
-        date_min = daily["Date"].min()
-        date_max = daily["Date"].max()
-        ev = df_events[
-            (df_events["Date"] >= date_min) &
-            (df_events["Date"] <= date_max)
-        ]
-        for _, row in ev.iterrows():
+        for _, row in df_events.iterrows():
             country = str(row.get("Country", "기타"))
             etype   = str(row.get("Type", "기타"))
             title   = str(row.get("Title", ""))
@@ -639,35 +633,61 @@ def build_trend_chart(df_all, selected_date, df_events=None):
             dash    = "solid" if country == "미국" else "dot"
             flag    = "🇺🇸" if country == "미국" else "🇰🇷"
 
-            fig.add_vline(
-                x=str(row["Date"].date()),
-                line=dict(color=color, width=1.2, dash=dash),
-                annotation_text=f"{flag}{title}",
-                annotation_textangle=-90,
-                annotation_font_size=9,
-                annotation_font_color=color,
-                annotation_position="top",
+            # 수직선 + 레이블을 scatter + shape 조합으로 표시
+            date_str = str(row["Date"].date())
+            y_val    = ymax * 0.95
+
+            # 수직선 (shape)
+            fig.add_shape(
+                type="line",
+                x0=date_str, x1=date_str,
+                y0=0, y1=1,
+                xref="x", yref="paper",
+                line=dict(color=color, width=1.5, dash=dash),
             )
-            # 호버용 invisible scatter
-            match = daily[daily["Date"].dt.date == row["Date"].date()]
-            y_val = match["조"].values[0] if not match.empty else ymax * 0.9
+            # 레이블
+            fig.add_annotation(
+                x=date_str,
+                y=1.0,
+                xref="x", yref="paper",
+                text=f"{flag}{title}",
+                textangle=-90,
+                font=dict(size=9, color=color),
+                showarrow=False,
+                yanchor="top",
+                xanchor="center",
+            )
+            # 호버용 마커
             fig.add_trace(go.Scatter(
-                x=[row["Date"]], y=[y_val],
+                x=[row["Date"]],
+                y=[y_val],
                 mode="markers",
-                marker=dict(color=color, size=8, symbol="diamond"),
+                marker=dict(color=color, size=9, symbol="diamond"),
                 showlegend=False,
                 hovertemplate=(
                     f"<b>{flag} {title}</b><br>"
-                    f"날짜: {row['Date'].strftime('%Y-%m-%d')}<br>"
+                    f"날짜: {date_str}<br>"
                     f"국가: {country} | 유형: {etype}<br>"
                     f"{desc}<extra></extra>"
                 ),
             ))
 
+    # x축 범위를 이벤트 날짜까지 연장
+    x_min = daily["Date"].min()
+    x_max = daily["Date"].max()
+    if df_events is not None and not df_events.empty:
+        ev_max = df_events["Date"].max()
+        ev_min = df_events["Date"].min()
+        x_max  = max(x_max, ev_max + pd.Timedelta(days=7))
+        x_min  = min(x_min, ev_min - pd.Timedelta(days=7))
+
     fig.update_layout(
         height=220,
         margin=dict(t=25, b=35, l=65, r=90),
-        xaxis=dict(showgrid=False, title="", tickformat="%y.%m"),
+        xaxis=dict(
+            showgrid=False, title="", tickformat="%y.%m",
+            range=[str(x_min.date()), str(x_max.date())],
+        ),
         yaxis=dict(showgrid=True, title="조원"),
         showlegend=False,
         hovermode="x unified",
@@ -681,6 +701,28 @@ def build_trend_chart(df_all, selected_date, df_events=None):
 # MAIN
 # ═══════════════════════════════════════
 
+def _get_secret(key):
+    """st.secrets 우선, 실패 시 toml 직접 파싱"""
+    # 1. st.secrets
+    try:
+        val = st.secrets.get(key, "")
+        if val:
+            return val
+    except Exception:
+        pass
+    # 2. toml 직접 파싱
+    try:
+        import toml
+        secrets_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".streamlit", "secrets.toml"
+        )
+        if os.path.exists(secrets_path):
+            return toml.load(secrets_path).get(key, "")
+    except Exception:
+        pass
+    return ""
+
 def check_password():
     """비밀번호 확인 — 통과하면 True 반환"""
     if st.session_state.get("authenticated"):
@@ -690,19 +732,7 @@ def check_password():
     st.markdown("---")
     pw = st.text_input("비밀번호를 입력하세요", type="password", placeholder="Password")
     if st.button("로그인", use_container_width=True):
-        correct = st.secrets.get("APP_PASSWORD", "")
-        if not correct:
-            # secrets 없으면 toml 직접 파싱
-            try:
-                import toml
-                secrets_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    ".streamlit", "secrets.toml"
-                )
-                if os.path.exists(secrets_path):
-                    correct = toml.load(secrets_path).get("APP_PASSWORD", "")
-            except Exception:
-                pass
+        correct = _get_secret("APP_PASSWORD")
         if pw == correct and correct:
             st.session_state["authenticated"] = True
             st.rerun()
@@ -785,6 +815,12 @@ def main():
     kospi_idx       = get_kospi_index(token)
     available_dates = sorted(df_history["Date"].dt.date.unique())
 
+    # 시작 날짜 기준 필터링
+    chart_start = st.session_state.get("chart_start", None)
+    if chart_start:
+        available_dates = [d for d in available_dates if d >= chart_start]
+        df_history = df_history[df_history["Date"].dt.date >= chart_start].copy()
+
     # 2년간 일별 시총 최대/최솟값 계산
     daily_totals = df_history.groupby("Date")["Marcap"].sum() / 1e12
     total_max = daily_totals.max()
@@ -823,6 +859,22 @@ def main():
 
         st.subheader("기타")
         top_n = st.slider("표시 종목 수", 30, 200, 100, 10)
+
+        st.subheader("📅 표시 기간")
+        if not df_history.empty:
+            min_date    = df_history["Date"].min().date()
+            max_date    = df_history["Date"].max().date()
+            from datetime import date as date_type
+            default_start = max(min_date, date_type(2026, 1, 1))
+            chart_start = st.date_input(
+                "시작 날짜",
+                value=default_start,
+                min_value=min_date,
+                max_value=max_date,
+                key="chart_start"
+            )
+        else:
+            chart_start = None
 
         st.markdown("---")
         if st.button("🔄 오늘 데이터 갱신"):
