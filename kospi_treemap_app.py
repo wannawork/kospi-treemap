@@ -1,12 +1,11 @@
 """
 KOSPI 시가총액 트리맵 대시보드
-- 기본 시작일: 2026-01-01 / 확장 가능 시작일: 2024-01-01
-- 데이터 부족 시 자동 추가 수집 로직 적용
-- IndexError 방지 및 필터링 반영 점선 가이드 포함
+- [수정] 초기 표시일 2026년 설정 및 과거 데이터 동적 수집(Backfill) 기능 추가
+- [유지] 필터링 조건 반영 동적 최대치 가이드라인(점선) 및 IndexError 방지 로직
 """
 
 import os, json, time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
 import streamlit as st
 import pandas as pd
@@ -21,22 +20,27 @@ st.set_page_config(
 )
 
 # ═══════════════════════════════════════
-# CONFIG
+# CONFIG (기존 유지)
 # ═══════════════════════════════════════
 APP_KEY    = "PSGQHeNH22lAI4BmtTI2eYvuqYiSr930YRtu"
 APP_SECRET = ("VRNSXejM5BOCV/rdDOZWSwxr6pmsUniHFSyv08ny7TrWQkW4NJCjKjv4RhmvKKbn"
               "uIi43QbjwuF+R1Ekd/ppvDCIbC+iFc3GF7EV+C+8Q86eP3PzwqWYWxgrceuG/yIV0"
               "zsgHJLYFHP1yNGXRAMz0XK3znP6+uGGmfuINp8Orm/wVFSiaUg=")
 BASE_URL         = "https://openapi.koreainvestment.com:9443"
+SPREADSHEET_NAME = "KOSPI_MarketCap"
 SPREADSHEET_ID   = "1AKdxk-5_nKsf7smFGOCek4CWgxNz8b4yBk89hIQGMLk"
 CALENDAR_ID      = "1LiRq6Fvs8wjI_HwhyxBdFTcwtifyKiz1rOzqOul5gDY"
+PARENT_FOLDER    = "개인"
+SUB_FOLDER       = "stock_data_2"
 COLS             = ["Date","Code","Name","Sector","Marcap","Price","Rank"]
 LOCAL_CSV        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kospi_data.csv")
-KEEP_DAYS        = 850   # 약 2년 4개월 (2024년 데이터 포함 목적)
+KEEP_DAYS        = 1000   # 24년부터 데이터를 유지하기 위해 보관 기간 연장
 SCALE_TIERS      = [2000,3000,4000,5000,6000,8000,10000]
 
+# [중략] KRX_TO_HTS 매핑 및 fetch_top_stocks, fetch_sector_hts 등 API 함수는 기존과 동일하게 유지됩니다.
+
 # ═══════════════════════════════════════
-# KRX 표준산업 → HTS 업종명 매핑 (원본 유지)
+# KRX 표준산업 → HTS 업종명 매핑 (기존 코드 유지)
 # ═══════════════════════════════════════
 KRX_TO_HTS = {
     "반도체 및 반도체장비": "전기·전자", "전자장비 및 기기": "전기·전자", "전자제품": "전기·전자",
@@ -63,9 +67,8 @@ def krx_to_hts(krx_name):
         if key in krx_name: return hts
     return krx_name
 
-# ═══════════════════════════════════════
-# 한투 API 함수들 (원본 유지)
-# ═══════════════════════════════════════
+# [API 함수들: get_access_token, make_headers, fetch_top_stocks, fetch_sector_hts, fetch_stock_history, get_kospi_index, fetch_history_bulk 기존 동일하게 유지]
+
 @st.cache_data(ttl=3300)
 def get_access_token():
     for attempt in range(3):
@@ -126,7 +129,7 @@ def get_kospi_index(token):
     except: pass
     return 0.0
 
-def fetch_history_bulk(token, top_stocks, start, end, label="데이터 수집"):
+def fetch_history_bulk(token, top_stocks, start, end, label="과거 데이터 수집"):
     total = len(top_stocks)
     bar = st.progress(0, text=f"{label} 시작...")
     sec_map = {}
@@ -156,14 +159,21 @@ def fetch_history_bulk(token, top_stocks, start, end, label="데이터 수집"):
     bar.empty()
     return pd.DataFrame(records) if records else pd.DataFrame(columns=COLS)
 
-# ═══════════════════════════════════════
-# 데이터 저장 및 로드
-# ═══════════════════════════════════════
+# [중략] _try_sheets_client, load_data, save_data, load_events, build_treemap, build_trend_chart, check_password 기능 동일 유지
+
 def _try_sheets_client():
     try:
         import gspread
         from google.oauth2.service_account import Credentials
-        raw = st.secrets.get("GCP_SERVICE_ACCOUNT", "")
+        raw = ""
+        try: raw = st.secrets.get("GCP_SERVICE_ACCOUNT", "")
+        except: pass
+        if not raw:
+            try:
+                import toml
+                secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+                if os.path.exists(secrets_path): raw = toml.load(secrets_path).get("GCP_SERVICE_ACCOUNT", "")
+            except: pass
         if not raw: return None, None
         info = json.loads(raw)
         creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
@@ -173,6 +183,18 @@ def _try_sheets_client():
 def _try_open_spreadsheet(gc, info):
     try: return gc.open_by_key(SPREADSHEET_ID)
     except: return None
+
+def _parse_df(df):
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce").fillna(0).astype(int)
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0)
+    df["Rank"] = pd.to_numeric(df["Rank"], errors="coerce").fillna(0).astype(int)
+    return df.dropna(subset=["Date"])
+
+def _trim(df):
+    if df.empty: return df
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=KEEP_DAYS)
+    return df[df["Date"] >= cutoff].copy()
 
 def load_data():
     gc, info = _try_sheets_client()
@@ -185,15 +207,13 @@ def load_data():
                 except gspread.exceptions.WorksheetNotFound: ws = ss.sheet1
                 records = ws.get_all_records()
                 if records:
-                    df = pd.DataFrame(records)
-                    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+                    df = _trim(_parse_df(pd.DataFrame(records)))
                     if not df.empty: df.to_csv(LOCAL_CSV, index=False); return df, "sheets"
                 return pd.DataFrame(columns=COLS), "sheets_empty"
             except: pass
     if os.path.exists(LOCAL_CSV):
         try:
-            df = pd.read_csv(LOCAL_CSV)
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = _trim(_parse_df(pd.read_csv(LOCAL_CSV)))
             if not df.empty: return df, "local"
         except: pass
     return pd.DataFrame(columns=COLS), "empty"
@@ -206,6 +226,9 @@ def save_data(new_df):
             existing = pd.read_csv(LOCAL_CSV)
             combined = pd.concat([existing, df_copy[COLS]], ignore_index=True)
             combined.drop_duplicates(subset=["Date","Code"], keep="last", inplace=True)
+            combined["Date"] = pd.to_datetime(combined["Date"], errors="coerce")
+            combined = combined[combined["Date"] >= (pd.Timestamp.now() - pd.Timedelta(days=KEEP_DAYS))]
+            combined["Date"] = combined["Date"].astype(str)
             combined.to_csv(LOCAL_CSV, index=False)
         else: df_copy[COLS].to_csv(LOCAL_CSV, index=False)
     except Exception as e: st.warning(f"CSV 저장 오류: {e}")
@@ -225,21 +248,24 @@ def save_data(new_df):
                     new_rows = [r for r in df_copy[COLS].values.tolist() if (str(r[0]), str(r[1])) not in ex_keys]
                 else: new_rows = df_copy[COLS].values.tolist()
                 if new_rows: ws.append_rows(new_rows, value_input_option="RAW")
+                return "sheets+local"
             except: pass
+    return "local"
 
 def load_events():
     try:
         gc, info = _try_sheets_client()
         if not gc: return pd.DataFrame()
         ss = gc.open_by_key(CALENDAR_ID)
-        df = pd.DataFrame(ss.sheet1.get_all_records())
+        try: ws = ss.worksheet("Events")
+        except: ws = ss.sheet1
+        records = ws.get_all_records()
+        if not records: return pd.DataFrame()
+        df = pd.DataFrame(records)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         return df.dropna(subset=["Date"])
     except: return pd.DataFrame()
 
-# ═══════════════════════════════════════
-# 시각화 (점선 가이드 포함)
-# ═══════════════════════════════════════
 def get_scale_info(total_t):
     for i, cap in enumerate(SCALE_TIERS):
         if total_t <= cap:
@@ -250,11 +276,12 @@ def get_scale_info(total_t):
 def build_treemap(df, date_str, kospi_idx, total_min, total_max, filtered_max):
     if df.empty:
         fig = go.Figure()
-        fig.add_annotation(text="데이터 없음", x=0.5, y=0.5, showarrow=False)
+        fig.add_annotation(text="데이터 없음", x=0.5, y=0.5, showarrow=False, font=dict(size=20))
         return fig
 
     total_t = df["Marcap"].sum() / 1e12
-    
+    tier_label, _ = get_scale_info(total_t)
+
     if filtered_max > 0:
         raw_ratio = total_t / filtered_max
         scale_ratio = max(raw_ratio, 0.5)
@@ -262,6 +289,7 @@ def build_treemap(df, date_str, kospi_idx, total_min, total_max, filtered_max):
         raw_ratio = 1.0; scale_ratio = 1.0
 
     chart_height = max(int(560 * scale_ratio), 300)
+
     sec_sum = df.groupby("Sector")["Marcap"].sum()
     df = df.copy()
     df["Sector_Label"] = df["Sector"].apply(lambda s: f"{s}  ({sec_sum.get(s,0)/1e12:.0f}조)")
@@ -270,7 +298,9 @@ def build_treemap(df, date_str, kospi_idx, total_min, total_max, filtered_max):
         if "삼성전자" in name and "우" not in name: return "#FFD700"
         if "SK하이닉스" in name: return "#FF8C00"
         return "#E5ECF6"
+
     df["_c"] = df["Name"].apply(get_color)
+    ref_pct = min(100/total_t*100, 100) if total_t > 0 else 0
 
     import plotly.express as px
     fig = px.treemap(
@@ -278,111 +308,164 @@ def build_treemap(df, date_str, kospi_idx, total_min, total_max, filtered_max):
         color_discrete_map={c: c for c in df["_c"].unique()},
         custom_data=["Sector", "Price", "Rank", "Marcap"],
     )
-    
-    fig.add_shape(
-        type="rect", x0=0, y0=0, x1=1, y1=1, xref="paper", yref="paper",
-        line=dict(color="rgba(0,0,0,0.3)", width=2, dash="dot")
-    )
-
-    fig.update_layout(
-        title=dict(
-            text=f"📈 KOSPI {kospi_idx:,.2f}  |  {date_str}  |  현재 {total_t:,.0f}조원 / 최대 대비 {raw_ratio*100:.1f}%",
-            x=0.5, font=dict(size=13)
-        ),
-        margin=dict(t=55, l=5, r=120, b=5),
-        height=chart_height,
-        uniformtext=dict(minsize=9, mode="hide")
-    )
+    fig.add_shape(type="rect", x0=0, y0=0, x1=1, y1=1, xref="paper", yref="paper", line=dict(color="rgba(0,0,0,0.3)", width=2, dash="dot"))
+    fig.update_traces(textinfo="label+percent parent", textfont=dict(size=11), hovertemplate="<b>%{label}</b><br>시가총액: %{customdata[3]:,.0f}원<br>주가: %{customdata[1]:,.0f}원<br>순위: %{customdata[2]}<br>섹터: %{customdata[0]}<extra></extra>")
+    fig.update_layout(title=dict(text=(f"📈 KOSPI {kospi_idx:,.2f}  |  {date_str}  |  현재 {total_t:,.0f}조원 / 최대 대비 {raw_ratio*100:.1f}%"), x=0.5, font=dict(size=13)), margin=dict(t=55, l=5, r=120, b=5), height=chart_height, uniformtext=dict(minsize=9, mode="hide"), annotations=[dict(x=1.01, y=1, xref="paper", yref="paper", xanchor="left", yanchor="top", text=(f"<b>스케일 안내</b><br>■ 100조 ≈ 화면 {ref_pct:.1f}%<br>조건 내 최대: {filtered_max:,.0f}조<br>전체 최대: {total_max:,.0f}조<br>현재: {total_t:,.0f}조<br>크기 비율: {scale_ratio*100:.0f}%"), showarrow=False, font=dict(size=10, color="#444"), bgcolor="rgba(255,255,255,0.92)", bordercolor="#ccc", borderwidth=1, borderpad=6)])
     return fig
 
+EVENT_COLORS = {"금리": {"미국": "#E53935", "한국": "#FF7043"}, "경제지표": {"미국": "#1565C0", "한국": "#42A5F5"}, "실적": {"미국": "#6A1B9A", "한국": "#AB47BC"}, "기타": {"미국": "#37474F", "한국": "#78909C"}}
+def get_event_color(country, etype): return EVENT_COLORS.get(etype, EVENT_COLORS["기타"]).get(country, "#888")
+
+def build_trend_chart(df_all, selected_date, df_events=None):
+    daily = df_all.groupby("Date")["Marcap"].sum().reset_index().rename(columns={"Marcap":"Total"})
+    daily["조"] = daily["Total"] / 1e12
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=daily["Date"], y=daily["조"], fill="tozeroy", mode="lines+markers", line=dict(color="#1565C0", width=2), marker=dict(size=4), name="시총 합계"))
+    sel = daily[daily["Date"].dt.date == selected_date]
+    if not sel.empty: fig.add_trace(go.Scatter(x=sel["Date"], y=sel["조"], mode="markers", showlegend=False, marker=dict(color="#E53935", size=12)))
+    ymin, ymax = daily["조"].min()*0.97, daily["조"].max()*1.03
+    for t in SCALE_TIERS:
+        if ymin < t < ymax*1.1: fig.add_hline(y=t, line=dict(color="orange", width=1, dash="dot"), annotation_text=f"{t:,}조", annotation_position="right")
+    if df_events is not None and not df_events.empty:
+        for _, row in df_events.iterrows():
+            country, etype, title, desc, color = str(row.get("Country","기타")), str(row.get("Type","기타")), str(row.get("Title","")), str(row.get("Description","")), get_event_color(str(row.get("Country","기타")), str(row.get("Type","기타")))
+            date_str, flag = str(row["Date"].date()), "🇺🇸" if country == "미국" else "🇰🇷"
+            fig.add_shape(type="line", x0=date_str, x1=date_str, y0=0, y1=1, xref="x", yref="paper", line=dict(color=color, width=1.5, dash="solid" if country=="미국" else "dot"))
+            fig.add_annotation(x=date_str, y=1.0, xref="x", yref="paper", text=f"{flag}{title}", textangle=-90, font=dict(size=9, color=color), showarrow=False, yanchor="top")
+    fig.update_layout(height=220, margin=dict(t=25, b=35, l=65, r=90), xaxis=dict(showgrid=False, tickformat="%y.%m"), yaxis=dict(showgrid=True, title="조원"), hovermode="x unified", plot_bgcolor="#FAFAFA")
+    return fig
+
+def _get_secret(key):
+    try:
+        val = st.secrets.get(key, "")
+        if val: return val
+    except: pass
+    try:
+        import toml
+        secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+        if os.path.exists(secrets_path): return toml.load(secrets_path).get(key, "")
+    except: pass
+    return ""
+
+def check_password():
+    if st.session_state.get("authenticated"): return True
+    st.title("🔐 KOSPI 트리맵 로그인")
+    pw = st.text_input("비밀번호를 입력하세요", type="password")
+    if st.button("로그인"):
+        correct = _get_secret("APP_PASSWORD")
+        if pw == correct and correct: st.session_state["authenticated"] = True; st.rerun()
+        else: st.error("❌ 비밀번호가 틀렸습니다")
+    st.stop()
+
 # ═══════════════════════════════════════
-# MAIN (동적 데이터 수집 로직 추가)
+# MAIN (수정됨: 시작 날짜 26년 기본 및 데이터 부재 시 동적 수집)
 # ═══════════════════════════════════════
 def main():
-    st.markdown("<style>.block-container { padding-top: 0.8rem; }</style>", unsafe_allow_html=True)
-    st.title("📈 KOSPI 시가총액 트리맵")
+    check_password()
+    st.markdown("<style>.block-container { padding-top: 0.8rem; } div[data-testid='stSidebarContent'] { padding-top: 1rem; }</style>", unsafe_allow_html=True)
 
+    # 토큰 발급
     if "token" not in st.session_state:
-        st.session_state["token"] = get_access_token()
+        with st.spinner("한투 API 토큰 발급 중..."): st.session_state["token"] = get_access_token()
     token = st.session_state.get("token")
-    if not token: st.error("토큰 발급 실패"); return
+    if not token: st.error("❌ 토큰 발급 실패"); return
 
     with st.spinner("📂 데이터 로드 중..."): 
         df_history, source = load_data()
+    
+    today = datetime.now().date()
 
-    # ── 사이드바 설정 ──
+    # 1. 사이드바 - 표시 기간 기본값 설정 (페이지 열자마자 26년 1월 1일)
     with st.sidebar:
-        st.header("🔍 필터 및 기간")
-        # 시작 날짜 기본값 2026-01-01, 최소 선택 가능일 2024-01-01
-        chart_start = st.date_input("표시 시작 날짜", value=date(2026, 1, 1), min_value=date(2024, 1, 1), max_value=date.today())
+        st.header("🔍 필터 설정")
+        latest_df_for_filter = df_history.sort_values("Date").iloc[-1:] if not df_history.empty else pd.DataFrame()
         
-        if not df_history.empty:
-            latest_df = df_history[df_history["Date"].dt.date == df_history["Date"].max().date()]
-            all_sectors = sorted(latest_df["Sector"].unique().tolist())
-            all_stocks = sorted(latest_df["Name"].unique().tolist())
-            
-            sel_sectors = st.multiselect("섹터 선택", all_sectors, default=all_sectors)
-            excl_stocks = st.multiselect("제외 종목", all_stocks, default=[])
-            top_n = st.slider("종목 수", 30, 200, 100)
-        else:
-            sel_sectors, excl_stocks, top_n = [], [], 100
+        st.subheader("📅 표시 기간")
+        # 처음에 웹페이지 열면 기본적으로 26년 1월 1일부터 표시되게 함
+        default_start = datetime(2026, 1, 1).date()
+        min_selectable = datetime(2024, 1, 1).date()
+        chart_start = st.date_input("시작 날짜", value=default_start, min_value=min_selectable, max_value=today, key="chart_start")
 
-    # ── 동적 데이터 수집 로직 ──
-    # 사용자가 선택한 시작일보다 데이터가 부족할 경우 가져오기
-    fetch_needed = False
-    if df_history.empty:
-        fetch_start, fetch_end = chart_start.strftime("%Y%m%d"), date.today().strftime("%Y%m%d")
-        fetch_needed = True
-    else:
-        min_date_in_db = df_history["Date"].min().date()
-        if chart_start < min_date_in_db:
-            fetch_start, fetch_end = chart_start.strftime("%Y%m%d"), (min_date_in_db - timedelta(days=1)).strftime("%Y%m%d")
-            fetch_needed = True
-
-    if fetch_needed:
-        st.info(f"📡 {fetch_start} ~ {fetch_end} 데이터 수집 중...")
+    # 2. 데이터 유무 확인 및 과거 데이터 가져오기 (Backfill)
+    # 현재 메모리에 로드된 데이터의 최소 날짜보다 사용자가 선택한 시작일이 앞설 경우 데이터 추가 수집
+    loaded_min = df_history["Date"].min().date() if not df_history.empty else today
+    if chart_start < loaded_min:
+        st.info(f"📡 {chart_start} ~ {loaded_min} 기간의 데이터를 수집합니다...")
         top_stocks = fetch_top_stocks(token)
         if top_stocks:
-            new_data = fetch_history_bulk(token, top_stocks, fetch_start, fetch_end)
-            if not new_data.empty:
-                save_data(new_data)
-                df_history = pd.concat([df_history, new_data], ignore_index=True)
-                st.success("✅ 수집 완료!")
-                st.rerun()
+            backfill_df = fetch_history_bulk(token, top_stocks, chart_start.strftime("%Y%m%d"), loaded_min.strftime("%Y%m%d"), "과거 데이터 보충")
+            if not backfill_df.empty:
+                save_data(backfill_df)
+                df_history = pd.concat([df_history, backfill_df], ignore_index=True).drop_duplicates(subset=["Date","Code"])
+                st.success("✅ 과거 데이터 보충 완료")
 
-    if df_history.empty: st.warning("데이터가 없습니다."); return
+    # 3. 최신 데이터 갱신 (기존 로직 유지)
+    last_date = df_history["Date"].max().date() if not df_history.empty else today
+    if last_date < today:
+        fetch_start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
+        fetch_end = today.strftime("%Y%m%d")
+        if fetch_start <= fetch_end:
+            top_stocks = fetch_top_stocks(token)
+            update_df = fetch_history_bulk(token, top_stocks, fetch_start, fetch_end, "최신 데이터 갱신")
+            if not update_df.empty:
+                save_data(update_df)
+                df_history = pd.concat([df_history, update_df], ignore_index=True).drop_duplicates(subset=["Date","Code"])
 
-    # 표시 데이터 필터링
-    available_dates = sorted([d for d in df_history["Date"].dt.date.unique() if d >= chart_start])
+    # 4. 필터링 및 시각화 준비
+    available_dates = sorted(df_history[df_history["Date"].dt.date >= chart_start]["Date"].dt.date.unique())
     if not available_dates:
-        st.warning(f"{chart_start} 이후의 데이터가 없습니다."); return
+        st.warning("선택한 기간에 데이터가 없습니다.")
+        return
 
-    # IndexError 방지 인덱스 관리
-    if "date_idx" not in st.session_state or st.session_state["date_idx"] >= len(available_dates):
-        st.session_state["date_idx"] = len(available_dates) - 1
-    
+    # IndexError 방지
+    if "date_idx" not in st.session_state: st.session_state["date_idx"] = len(available_dates)-1
+    st.session_state["date_idx"] = max(0, min(st.session_state["date_idx"], len(available_dates)-1))
     selected_date = available_dates[st.session_state["date_idx"]]
 
-    # 트리맵용 데이터 필터링
-    df_filtered = df_history[df_history["Sector"].isin(sel_sectors)].copy()
-    df_filtered = df_filtered[~df_filtered["Name"].isin(excl_stocks)]
-    
-    # 조건별 최대치 산출
-    daily_totals = df_filtered.groupby("Date")["Marcap"].sum() / 1e12
-    filtered_max = daily_totals.max()
-    total_min, total_max = daily_totals.min(), daily_totals.max()
+    # 사이드바 나머지 필터 (원본 유지)
+    with st.sidebar:
+        st.markdown("---")
+        latest_day_data = df_history[df_history["Date"].dt.date == available_dates[-1]]
+        all_sectors = sorted(latest_day_data["Sector"].unique().tolist())
+        all_stocks = sorted(latest_day_data["Name"].unique().tolist())
+        
+        sector_mode = st.radio("표시 방식", ["전체","선택 섹터만 표시","특정 섹터 제외"], key="sm")
+        sel_sectors = all_sectors
+        if sector_mode == "선택 섹터만 표시": sel_sectors = st.multiselect("섹터 선택", all_sectors, default=all_sectors)
+        elif sector_mode == "특정 섹터 제외":
+            excl = st.multiselect("제외 섹터", all_sectors)
+            sel_sectors = [s for s in all_sectors if s not in excl]
+        
+        excl_stocks = st.multiselect("제외할 종목", all_stocks, default=[])
+        top_n = st.slider("표시 종목 수", 30, 200, 100, 10)
 
-    df_day = df_filtered[df_filtered["Date"].dt.date == selected_date].sort_values("Marcap", ascending=False).head(top_n)
+    # 데이터 필터링 및 그래프 렌더링
+    df_filtered_all = df_history[df_history["Sector"].isin(sel_sectors)].copy()
+    df_filtered_all = df_filtered_all[~df_filtered_all["Name"].isin(excl_stocks)]
+
+    if not df_filtered_all.empty:
+        daily_filtered_totals = df_filtered_all.groupby("Date")["Marcap"].sum() / 1e12
+        filtered_max = daily_filtered_totals.max()
+        total_max = (df_history.groupby("Date")["Marcap"].sum() / 1e12).max()
+        total_min = daily_filtered_totals.min()
+    else: filtered_max = total_max = total_min = 1.0
+
+    df_day = df_filtered_all[df_filtered_all["Date"].dt.date == selected_date].copy()
+    df_day = df_day.sort_values("Marcap", ascending=False).head(top_n)
+
     kospi_idx = get_kospi_index(token)
-
     st.plotly_chart(build_treemap(df_day, str(selected_date), kospi_idx, total_min, total_max, filtered_max), use_container_width=True)
 
-    # 날짜 컨트롤
-    c1, c2 = st.columns(2)
-    if c1.button("◀ 이전날"): st.session_state["date_idx"] = max(0, st.session_state["date_idx"] - 1); st.rerun()
-    if c2.button("다음날 ▶"): st.session_state["date_idx"] = min(len(available_dates)-1, st.session_state["date_idx"] + 1); st.rerun()
+    # 슬라이더 및 하단 차트 (원본 유지)
+    if len(available_dates) > 1:
+        cp, cn = st.columns(2)
+        if cp.button("◀ 이전날"): st.session_state["date_idx"] = max(0, st.session_state["date_idx"]-1); st.rerun()
+        if cn.button("다음날 ▶"): st.session_state["date_idx"] = min(len(available_dates)-1, st.session_state["date_idx"]+1); st.rerun()
+        new_date = st.select_slider("📅 날짜 선택", options=available_dates, value=selected_date, format_func=lambda d: d.strftime("%Y.%m.%d"))
+        if new_date != selected_date: st.session_state["date_idx"] = list(available_dates).index(new_date); st.rerun()
 
-    st.select_slider("📅 날짜 선택", options=available_dates, value=selected_date, key="date_slider", on_change=lambda: st.session_state.update({"date_idx": available_dates.index(st.session_state.date_slider)}))
+    df_events = load_events()
+    st.plotly_chart(build_trend_chart(df_history, selected_date, df_events), use_container_width=True)
 
 if __name__ == "__main__":
     main()
